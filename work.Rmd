@@ -1,0 +1,236 @@
+---
+title: "House Prices"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(janitor)
+library(caret)
+library(scales)
+library(ggthemes)
+knitr::opts_chunk$set(echo = TRUE)
+theme_set(theme_light())
+
+test <- read.csv("test.csv", stringsAsFactors = FALSE)
+train <- read.csv("train.csv", stringsAsFactors = FALSE)
+```
+
+```{r explore, include=FALSE}
+text_data <- sum(sapply(train[, 1:81], typeof) == "character")
+#43
+numeric_data <- sum(sapply(train[, 1:81], typeof) == "integer")
+#38
+
+summary(train[, sapply(train[, 1:81], typeof) == "integer"])
+```
+
+```{r combine datasets, include = FALSE}
+# Add column for sales price in test set
+test <- test %>% 
+  mutate(SalePrice = NA)
+
+# Combine both sets
+houses <- rbind(train, test)
+
+# Check the NAs in each column
+na_cols <- which(colSums(is.na(houses)) > 0)
+sort(colSums(sapply(houses[na_cols], is.na)), decreasing = TRUE)
+
+# Pool, MiscFeatre, Alley, Fence, Fireplace, etc. are missing the most so I'll replace the NA's
+fill_missing <- function(x){ 
+ #NA for PoolQC means no pool
+  x[["PoolQC"]][is.na(x[["PoolQC"]])] <- "None"
+  #NA for MiscFeature means none
+  x[["MiscFeature"]][is.na(x[["MiscFeature"]])] <- "None"
+  #NA for Alley means no alley access
+  x[["Alley"]][is.na(x[["Alley"]])] <- "None"
+  #NA for Fence means no fence
+  x[["Fence"]][is.na(x[["Fence"]])] <- "None"
+  #NA for FireplaceQu means no fireplace
+  x[["FireplaceQu"]][is.na(x[["FireplaceQu"]])] <- "None"
+  #For NAs in LotFrontage, we will fill in the median lot frontage from the rest of the data.
+  x[["LotFrontage"]][is.na(x[["LotFrontage"]])] <- 69
+  #For NAs in the garage factors, they mean that there is no garage
+  x[["GarageYrBlt"]][is.na(x[["GarageYrBlt"]])] <- 0
+  x[["GarageFinish"]][is.na(x[["GarageFinish"]])] <- "None"
+  x[["GarageQual"]][is.na(x[["GarageQual"]])] <- "None"
+  x[["GarageCond"]][is.na(x[["GarageCond"]])] <- "None"
+  x[["GarageType"]][is.na(x[["GarageType"]])] <- "None"
+  x[["GarageCars"]][is.na(x[["GarageCars"]])] <- 0
+  x[["GarageArea"]][is.na(x[["GarageArea"]])] <- 0
+  #For NAs in the basement factors, they mean that there is no basement
+  x[["BsmtCond"]][is.na(x[["BsmtCond"]])] <- "None"
+  x[["BsmtExposure"]][is.na(x[["BsmtExposure"]])] <- "None"
+  x[["BsmtQual"]][is.na(x[["BsmtQual"]])] <- "None"
+  x[["BsmtFinType2"]][is.na(x[["BsmtFinType2"]])] <- "None"
+  x[["BsmtFinType1"]][is.na(x[["BsmtFinType1"]])] <- "None"
+  x[["BsmtFullBath"]][is.na(x[["BsmtFullBath"]])] <- 0
+  x[["BsmtHalfBath"]][is.na(x[["BsmtHalfBath"]])] <- 0
+  x[["BsmtFinSF1"]][is.na(x[["BsmtFinSF1"]])] <- 0
+  x[["BsmtFinSF2"]][is.na(x[["BsmtFinSF2"]])] <- 0
+  x[["BsmtUnfSF"]][is.na(x[["BsmtUnfSF"]])] <- 0
+  x[["TotalBsmtSF"]][is.na(x[["TotalBsmtSF"]])] <- 0
+  #NA for MasVnrType and MasVnrArea means no masory veneer
+  x[["MasVnrType"]][is.na(x[["MasVnrType"]])] <- "None"
+  x[["MasVnrArea"]][is.na(x[["MasVnrArea"]])] <- 0
+  #For NAs in MSZoning, we fill in the most common type, RL
+  x[["MSZoning"]][is.na(x[["MSZoning"]])] <- "RL"
+  #For NAs in Utilities, we fill in the most common type, AllPub
+  x[["Utilities"]][is.na(x[["Utilities"]])] <- "AllPub"
+  #For NAs in Functional, we fill in the most common type, Typ
+  x[["Functional"]][is.na(x[["Functional"]])] <- "Typ"
+  #For NAs in exteriors, we will fill in "Other"
+  x[["Exterior1st"]][is.na(x[["Exterior1st"]])] <- "Other"
+  x[["Exterior2nd"]][is.na(x[["Exterior2nd"]])] <- "Other"
+  #For NAs in Electrical, we fill in the most common type, SBrkr
+  x[["Electrical"]][is.na(x[["Electrical"]])] <- "SBrkr"
+  #For NAs in KitchenQual, we fill in the most common type, TA
+  x[["KitchenQual"]][is.na(x[["KitchenQual"]])] <- "TA"
+  #For NAs in SaleType, we fill in the most common type, WD
+  x[["SaleType"]][is.na(x[["SaleType"]])] <- "WD"
+  return(x)
+  }
+
+# There are also apparently variables which are basically ratings, from poor to good
+# I need to clean them as well. Thanks for pointing this out Jay Huang, RPubs.
+clean_data <- function(x){
+  #Numeric factors that should be categorical
+  x[["MoSold"]] <- factor(x[["MoSold"]])
+  x[["GarageYrBlt"]] <- factor(x[["GarageYrBlt"]])
+  x[["MSSubClass"]] <- factor(x[["MSSubClass"]])
+  
+  ratinglevels <- c("None", "Po", "Fa", "Ta", "Gd", "Ex")
+  
+  x[["ExterQual"]] <- as.numeric(factor(x[["ExterQual"]], levels  = ratinglevels))
+  x[["ExterCond"]] <- as.numeric(factor(x[["ExterCond"]], levels = ratinglevels))
+  x[["BsmtQual"]] <- as.numeric(factor(x[["BsmtQual"]], levels = ratinglevels))
+  x[["BsmtCond"]] <- as.numeric(factor(x[["BsmtCond"]], levels = ratinglevels))
+  x[["FireplaceQu"]] <- as.numeric(factor(x[["FireplaceQu"]], levels = ratinglevels))
+  x[["KitchenQual"]] <- as.numeric(factor(x[["KitchenQual"]], levels = ratinglevels))
+  x[["HeatingQC"]] <- as.numeric(factor(x[["HeatingQC"]], levels = ratinglevels))
+  x[["BsmtExposure"]] <- as.numeric(factor(x[["BsmtExposure"]], levels=c("None","No", "Mn", "Av", "Gd")))
+  x[["BsmtFinType1"]] <- as.numeric(factor(x[["BsmtFinType1"]], levels=c("None","Unf","LwQ","Rec","BLQ","ALQ","GLQ")))
+  x[["BsmtFinType2"]] <- as.numeric(factor(x[["BsmtFinType2"]], levels=c("None","Unf","LwQ","Rec","BLQ","ALQ","GLQ")))
+  x[["KitchenQual"]] <- as.numeric(factor(x[["KitchenQual"]], levels = ratinglevels))
+  x[["FireplaceQu"]] <- as.numeric(factor(x[["FireplaceQu"]], levels = ratinglevels))
+  x[["GarageQual"]] <- as.numeric(factor(x[["GarageQual"]], levels = ratinglevels))
+  x[["GarageCond"]] <- as.numeric(factor(x[["GarageCond"]], levels = ratinglevels))
+  x[["PoolQC"]] <- as.numeric(factor(x[["PoolQC"]], levels = c("None", "Fa", "Ta", "Gd", "Ex")))
+  return(x)
+}
+
+# Again, thanks to Jay Huang who proposed this idea of feature engineering
+create_scoring <- function(x){
+  x[["OverallGrade"]] <- x[["OverallQual"]] * x[["OverallCond"]]
+  x[["GarageGrade"]] <- x[["GarageQual"]] * x[["GarageCond"]]
+  x[["ExterGrade"]] <- x[["ExterQual"]] * x[["ExterCond"]]
+  x[["KitchenScore"]] <- x[["KitchenAbvGr"]] * x[["KitchenQual"]]
+  x[["FireplaceScore"]] <- x[["Fireplaces"]] * x[["FireplaceQu"]]
+  x[["GarageScore"]] <- x[["GarageArea"]] * x[["GarageQual"]]
+  x[["PoolScore"]] <- x[["PoolArea"]] * x[["PoolQC"]]
+  x[["TotalBath"]] <- x[["BsmtFullBath"]] + (0.5 * x[["BsmtHalfBath"]]) + x[["FullBath"]] + (0.5 * x[["HalfBath"]])
+  x[["TotalSF"]] <- x[["TotalBsmtSF"]] + x[["X1stFlrSF"]] + x[["X2ndFlrSF"]]
+  x[["TotalPorchSF"]] <- x[["OpenPorchSF"]] + x[["EnclosedPorch"]] + x[["X3SsnPorch"]] + x[["ScreenPorch"]]
+x <- x %>% 
+    mutate(remodeled = ifelse(YearBuilt == YearRemodAdd, 0, 1),
+           log_sale_price = log(SalePrice),
+           log_lot_area = log(LotArea))
+  return(x)
+}
+
+houses <- fill_missing(houses)
+houses <- clean_data(houses)
+houses <- create_scoring(houses)
+
+dmy <- dummyVars(" ~ .", data = houses)
+houses2 <- data.frame(predict(dmy, newdata = houses))
+dim(houses2)
+
+houses2 <- houses2 %>% 
+  clean_names()
+```
+
+```{r data viz, include=false}
+# Data is right skewed requiring a log transformation
+ggplot(houses2, aes(sale_price)) +
+  geom_histogram()
+
+houses3 <- houses2 %>% 
+  mutate(log_sale_price = log(sale_price),
+         log_lot_area = log(lot_area))
+
+# looks better
+ggplot(houses3, aes(log_sale_price)) +
+  geom_histogram()
+
+# Which variables are correlated to sales price
+houses3 %>% ggplot(aes(sale_price, overall_qual)) + geom_point() + coord_flip()
+
+houses3 %>% ggplot(aes(sale_price, total_sf)) + geom_point() + coord_flip()
+
+houses3 %>% ggplot(aes(sale_price, log_lot_area)) + geom_point() + coord_flip()
+```
+
+```{r plot function}
+
+plot_hist <- function(data_in, i){
+  
+  data <- data.frame(x = data_in[[i]])
+  
+  p <- ggplot(data  = data, aes(x = factor(x))) + 
+    stat_count() + xlab(colnames(data_in)[i]) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  
+  return(p)
+}
+
+
+plot_hist(houses3, 362)
+
+ggplot(houses, aes(x = Neighborhood, y = SalePrice)) + 
+  geom_boxplot() +
+  theme_few() + 
+  scale_y_continuous(labels = dollar_format())
+```
+
+As great, and as necessary as the one-hot encoding is, I'm going to work with just the original columns and a few, engineered ones so I'm going to go back and repeat the function calls while skipping the 'dummyVars' call. 
+
+```{r correlation plot}
+library(visdat)
+library(corrplot)
+
+houses4 <- houses %>% 
+  fill_missing() %>% 
+  clean_data() %>% 
+  create_scoring() %>% 
+  clean_names() # one of my favorite functions
+  
+# This is a great function which gives a pre-EDA visualization
+vis_dat(houses4, warn_large_data = FALSE)
+
+# Despite cleaning, it looks like there are still NAs
+na_cols <- which(colSums(is.na(houses4)) > 0)
+sort(colSums(sapply(houses4[na_cols], is.na)), decreasing = TRUE)
+
+houses4 <- houses4 %>% 
+  remove_empty("cols") %>% 
+  select(-garage_grade, -garage_cond, -bsmt_cond, -garage_qual, -garage_score,
+         -bsmt_qual) # keeping log_sale_price and sale_price since I know they are from the test data
+
+
+numericVars <- which(sapply(houses4, is.numeric)) #index vector numeric variables
+numericVarNames <- names(numericVars) #saving names vector for use later on
+
+all_numVar <- houses4[, numericVars]
+cor_numVar <- cor(all_numVar, use="pairwise.complete.obs")
+cor_sorted <- as.matrix(sort(cor_numVar[,'sale_price'], decreasing = TRUE))
+CorHigh <- names(which(apply(cor_sorted, 1, function(x) abs(x)>0.5)))
+cor_numVar <- cor_numVar[CorHigh, CorHigh]
+
+corrplot.mixed(cor_numVar, tl.col="black", tl.pos = "lt")
+```
+
+
+
+
